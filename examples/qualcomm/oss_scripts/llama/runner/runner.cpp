@@ -390,7 +390,6 @@ Error Runner<T>::generate_from_prompt_or_file(
     seq_len = context_len_;
   }
   int32_t n_bos = (cur_pos_ == 0) ? 1 : 0;
-
   // encode the (string) prompt into tokens sequence
   std::vector<uint64_t> prompt_tokens;
   if (tokenized_prompt) {
@@ -421,9 +420,36 @@ Error Runner<T>::generate_from_prompt_or_file(
   }
   int num_prompt_tokens = prompt_tokens.size();
   ET_CHECK_MSG(num_prompt_tokens >= 1, "Expected at least 1 prompt token");
-  ET_CHECK_MSG(
-      cur_pos_ + num_prompt_tokens < seq_len,
-      "sequence length exceeded - please increase the seq_len value");
+
+  // If the total length (history + current prompt) would exceed seq_len, we
+  // keep only the last allowed_prompt_tokens from the current prompt.
+  // This prevents runtime errors and makes the runner more robust for
+  // long multi-turn conversations where the full text no longer fits
+  // into the compiled context window.
+  if (cur_pos_ + num_prompt_tokens >= seq_len) {
+    int32_t allowed_prompt_tokens = seq_len - 1 - cur_pos_;
+    // If there is no room left for any new prompt tokens, we fail fast with a
+    // clear message. The application should either reset the conversation
+    // state or lower seq_len / history length.
+    ET_CHECK_MSG(
+        allowed_prompt_tokens > 0,
+        "sequence length exceeded - no room left for new prompt tokens. "
+        "Please reset conversation state or reduce history length.");
+
+    if (num_prompt_tokens > allowed_prompt_tokens) {
+      ET_LOG(
+          Info,
+          "Prompt too long: %d tokens with cur_pos_=%d and seq_len=%d. "
+          "Truncating to the last %d tokens to fit into context window.",
+          num_prompt_tokens,
+          cur_pos_,
+          seq_len,
+          allowed_prompt_tokens);
+      prompt_tokens = std::vector<uint64_t>(
+          prompt_tokens.end() - allowed_prompt_tokens, prompt_tokens.end());
+      num_prompt_tokens = prompt_tokens.size();
+    }
+  }
 
   // Prompt Processor first
   if (token_callback && config.echo) {
